@@ -216,3 +216,74 @@
 .widget-music-theme-light .widget-music-slider:insensitive {
 	background-color: transparent;
 }
+
+.widget-music-lyrics-container {
+	background-color: transparent;
+}
+
+.widget-music-lyrics-scroll {
+	background-color: transparent;
+}
+
+.widget-music-lyrics-title {
+	font-weight: 700;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.86);
+}
+
+.widget-music-lyric-button {
+	padding: 2px 4px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	background-color: transparent;
+	transition-duration: 120ms;
+}
+
+.widget-music-lyric-button:hover,
+.widget-music-lyric-button:focus {
+	border-color: rgba(255, 255, 255, 0.12);
+	background-color: rgba(255, 255, 255, 0.08);
+}
+
+.widget-music-lyric-button:active {
+	border-color: rgba(255, 255, 255, 0.18);
+	background-color: rgba(255, 255, 255, 0.14);
+}
+
+.widget-music-theme-light .widget-music-lyric-button:hover,
+.widget-music-theme-light .widget-music-lyric-button:focus {
+	border-color: rgba(36, 31, 49, 0.1);
+	background-color: rgba(36, 31, 49, 0.05);
+}
+
+.widget-music-theme-light .widget-music-lyric-button:active {
+	border-color: rgba(36, 31, 49, 0.15);
+	background-color: rgba(36, 31, 49, 0.08);
+}
+
+.widget-music-lyric-line {
+	font-weight: 500;
+	text-align: center;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.86);
+}
+
+.widget-music-lyric-active {
+	font-weight: 800;
+	color: #ffffff;
+}
+
+.widget-music-lyrics-footer {
+	font-weight: 500;
+	text-align: center;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.86);
+}
+
+.widget-music-lyrics-back-button {
+	padding: 0;
+	border-radius: 999px;
+}
+
+.widget-music-theme-light .widget-music-lyrics-title,
+.widget-music-theme-light .widget-music-lyric-line,
+.widget-music-theme-light .widget-music-lyrics-footer {
+	text-shadow: none;
+}
