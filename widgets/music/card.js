@@ -4,7 +4,7 @@ import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 import {surfaceStyle} from '../../utils/widget.js';
-import {VERTICAL, boxOrientation, createBlurEffect} from '../../compatibility.js';
+import {VERTICAL, boxOrientation, createBlurEffect, setScrollViewChild} from '../../compatibility.js';
 import {warn} from '../../logger.js';
 import {clipRounded} from '../../utils/roundedClip.js';
 import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -28,7 +28,7 @@ function safeArtworkUri(value) {
 
 	try {
 		const uri = GLib.Uri.parse(value, GLib.UriFlags.NONE);
-		const scheme = uri.get_scheme()?.toLowerCase();
+		const scheme = uri.get_scheme().toLowerCase();
 
 		return ['file', 'http', 'https'].includes(scheme) ? uri.to_string() : null;
 	} catch {
@@ -136,7 +136,7 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 	const playSize = compact ? 34 : roomy ? 44 : 38;
 	const showTimeline = !compact && contentHeight >= 100 && contentWidth >= 150;
 	const card = {};
-	const radius = theme?.radius ?? 26;
+	const radius = theme.radius ?? 26;
 	const backdropInset = 48;
 
 	card.container = new St.Widget({
@@ -222,7 +222,9 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 		const backdropActor = uri && card._backgroundEnabled
 			? artworkActor(uri, width + backdropInset * 2, height + backdropInset * 2, 'widget-music-backdrop-art')
 			: null;
-		backdropActor?.set_position(-backdropInset, -backdropInset);
+		if (backdropActor) {
+			backdropActor.set_position(-backdropInset, -backdropInset);
+		};
 
 		card.coverArt = replaceActor(card.coverBox, card.coverArt, coverActor);
 		card.backdropArt = replaceActor(card.backdrop, card.backdropArt, backdropActor);
@@ -350,6 +352,7 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 	card.btnPlay = createControlButton('media-playback-start-symbolic', roomy ? 24 : 21, playSize, colors.foreground);
 	card.btnPlay.button.add_style_class_name('widget-music-button-primary');
 	card.btnNext = createControlButton('media-skip-forward-symbolic', compact ? 17 : 19, controlSize, colors.foreground);
+	card.btnLyrics = createControlButton('folder-music-symbolic', compact ? 16 : 18, controlSize, colors.foreground);
 
 	const controlsStart = new St.Widget({x_expand: true, style_class: 'widget-music-controls-spacer'});
 	const controlsEnd = new St.Widget({x_expand: true, style_class: 'widget-music-controls-spacer'});
@@ -359,7 +362,7 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 	card.controls.add_child(card.btnPrev.button);
 	card.controls.add_child(card.btnPlay.button);
 	card.controls.add_child(card.btnNext.button);
-	card.controls.add_child(new St.Widget({width: controlSize, height: controlSize}));
+	card.controls.add_child(card.btnLyrics.button);
 	card.controls.add_child(controlsEnd);
 
 	card.times.add_child(card.timeElapsed);
@@ -375,6 +378,268 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 	if (!showTimeline) {
 		card.slider.hide();
 		card.times.hide();
+	};
+
+	const lyricFont = compact ? 10 : roomy ? 15 : 12;
+	const backSize = compact ? 26 : 28;
+	const footerFont = compact ? 9 : 10;
+	const lyricsGap = compact ? 4 : 6;
+	const footerHeight = footerFont + 6;
+	const lyricLineHeight = Math.round(lyricFont * 1.35);
+	const lyricsSpacing = compact ? 3 : 5;
+
+	card.lyricsView = new St.BoxLayout({
+		...VERTICAL,
+		style_class: 'widget-music-lyrics-container',
+		x_expand: true,
+		y_expand: true,
+		x_align: Clutter.ActorAlign.FILL,
+		y_align: Clutter.ActorAlign.FILL,
+		clip_to_allocation: true,
+		visible: false,
+		style: `spacing: ${lyricsGap}px; padding: ${pad}px;`,
+	});
+	card.lyricsView.set_size(width - 2, height - 2);
+
+	card.lyricsHeader = new St.BoxLayout({
+		x_expand: true,
+		y_expand: false,
+		x_align: Clutter.ActorAlign.FILL,
+		y_align: Clutter.ActorAlign.START,
+		style: 'spacing: 8px;',
+	});
+	card.lyricsHeader.set_height(backSize);
+
+	card.btnBack = createControlButton('pan-end-symbolic-rtl', compact ? 14 : 16, backSize, colors.foreground);
+	card.btnBack.button.add_style_class_name('widget-music-lyrics-back-button');
+	card.btnBack.button.x_align = Clutter.ActorAlign.START;
+	card.btnBack.button.y_align = Clutter.ActorAlign.CENTER;
+
+	card.lyricsTitle = createLabel('', 'widget-music-lyrics-title', `font-size: ${artistFont}px; color: ${colors.foreground};`);
+	card.lyricsTitle.x_expand = true;
+	card.lyricsTitle.y_align = Clutter.ActorAlign.CENTER;
+	card.lyricsTitle.clutter_text.single_line_mode = true;
+	card.lyricsTitle.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+
+	card.lyricsScroll = new St.ScrollView({
+		style_class: 'widget-music-lyrics-scroll',
+		hscrollbar_policy: St.PolicyType.NEVER,
+		vscrollbar_policy: St.PolicyType.AUTOMATIC,
+		overlay_scrollbars: true,
+		x_expand: true,
+		y_expand: true,
+		x_align: Clutter.ActorAlign.FILL,
+		y_align: Clutter.ActorAlign.FILL,
+		clip_to_allocation: true,
+	});
+
+	card.lyricsList = new St.BoxLayout({
+		...VERTICAL,
+		x_expand: true,
+		x_align: Clutter.ActorAlign.FILL,
+		style: `spacing: ${lyricsSpacing}px; padding: 4px;`,
+	});
+	setScrollViewChild(card.lyricsScroll, card.lyricsList);
+
+	card.lyricsFooter = createLabel(_('Lyrics provided by LRCLIB (lrclib.net)'), 'widget-music-lyrics-footer', `font-size: ${footerFont}px; color: ${colors.secondary};`);
+	card.lyricsFooter.x_align = Clutter.ActorAlign.CENTER;
+	card.lyricsFooter.y_expand = false;
+	card.lyricsFooter.set_height(footerHeight);
+	card.lyricsFooter.y_align = Clutter.ActorAlign.END;
+	card.lyricsFooter.clutter_text.single_line_mode = true;
+	card.lyricsFooter.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+
+	card.lyricsHeader.add_child(card.btnBack.button);
+	card.lyricsHeader.add_child(card.lyricsTitle);
+	card.lyricsView.add_child(card.lyricsHeader);
+	card.lyricsView.add_child(card.lyricsScroll);
+	card.lyricsView.add_child(card.lyricsFooter);
+	card.container.add_child(card.lyricsView);
+
+	card.lyricsLines = [];
+	card._lyricsMode = false;
+	card._activeLyric = -1;
+	card._centerPending = true;
+
+	const styleLyric = (button, label, active) => {
+		if (active) {
+			label.style = `font-size: ${lyricFont + 2}px; color: #ffffff; font-weight: 800; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);`;
+			button.add_style_class_name('widget-music-lyric-active');
+			label.add_style_class_name('widget-music-lyric-active');
+		} else {
+			label.style = `font-size: ${lyricFont}px; color: ${colors.secondary}; font-weight: 500; opacity: 0.7;`;
+			button.remove_style_class_name('widget-music-lyric-active');
+			label.remove_style_class_name('widget-music-lyric-active');
+		};
+	};
+
+	const createLyricLine = (text, index) => {
+		const button = new St.Button({
+			style_class: 'widget-music-lyric-button',
+			can_focus: true,
+			reactive: true,
+			track_hover: true,
+			x_expand: true,
+			y_expand: false,
+			x_align: Clutter.ActorAlign.FILL,
+			y_align: Clutter.ActorAlign.CENTER,
+		});
+
+		const label = new St.Label({
+			style_class: 'widget-music-lyric-line',
+			text,
+			x_expand: true,
+			y_expand: false,
+			x_align: Clutter.ActorAlign.FILL,
+			reactive: false,
+		});
+
+		label.clutter_text.line_wrap = true;
+		label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+		label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+		label.clutter_text.line_alignment = Pango.Alignment.CENTER;
+
+		button.set_child(label);
+
+		const triggerClick = () => {
+			card._onLyricClicked(index);
+		};
+
+		button.connectObject(
+			'clicked', triggerClick,
+			'button-release-event', (_source, event) => {
+				if (event.get_button() === 1) {
+					triggerClick();
+					return Clutter.EVENT_STOP;
+				};
+				return Clutter.EVENT_PROPAGATE;
+			},
+			button);
+
+		styleLyric(button, label, false);
+
+		return button;
+	};
+
+	card.lyricsAdjustment = function () {
+		const scroll = card.lyricsScroll;
+
+		return 'get_vadjustment' in scroll ? scroll.get_vadjustment() : scroll.get_vscroll_bar().get_adjustment();
+	};
+
+	card.setLyrics = function (texts, centered = false) {
+		card.lyricsList.destroy_all_children();
+		card.lyricsLines = [];
+		card._activeLyric = -1;
+		card._centerPending = true;
+
+		const padV = centered ? 24 : compact ? 20 : 28;
+		card.lyricsList.style = `spacing: ${lyricsSpacing}px; padding: ${padV}px 4px;`;
+
+		for (let i = 0; i < texts.length; i++) {
+			const line = createLyricLine(texts[i], i);
+
+			card.lyricsList.add_child(line);
+			card.lyricsLines.push(line);
+		};
+
+		const adjustment = card.lyricsAdjustment();
+
+		if (adjustment) {
+			adjustment.value = 0;
+		};
+	};
+
+	card.setLyricsMessage = function (kind) {
+		card.setLyrics([kind === 'loading' ? _('Loading lyrics…') : _('No lyrics found')], true);
+	};
+
+	card.centerLyric = function () {
+		const adjustment = card.lyricsAdjustment();
+
+		if (!adjustment || adjustment.page_size <= 0) {
+			card._centerPending = true;
+			return;
+		};
+
+		const line = card.lyricsLines[card._activeLyric];
+		let target = 0;
+
+		if (line) {
+			const box = line.get_allocation_box();
+
+			if (box.y2 <= box.y1) {
+				card._centerPending = true;
+				if (!card._retryCenterId) {
+					card._retryCenterId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+						card._retryCenterId = 0;
+						if (card._lyricsMode) card.centerLyric();
+						return GLib.SOURCE_REMOVE;
+					});
+				};
+				return;
+			};
+
+			const lineCenter = (box.y1 + box.y2) / 2;
+			target = lineCenter - adjustment.page_size / 2;
+
+			target = Math.min(target, box.y1 - 18);
+		};
+
+		target = Math.max(0, Math.min(target, Math.max(0, adjustment.upper - adjustment.page_size)));
+
+		const snap = card._centerPending;
+
+		card._centerPending = false;
+
+		if (snap) {
+			adjustment.value = target;
+		} else {
+			adjustment.ease(target, {duration: 300, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+		};
+	};
+
+	card.setActiveLyric = function (index) {
+		const changed = index !== card._activeLyric;
+
+		if (!changed && !card._centerPending) return;
+
+		if (changed) {
+			const previous = card.lyricsLines[card._activeLyric];
+			const next = card.lyricsLines[index];
+
+			if (previous) {
+				const prevLabel = previous.get_child();
+				styleLyric(previous, prevLabel, false);
+			};
+
+			if (next) {
+				const nextLabel = next.get_child();
+				styleLyric(next, nextLabel, true);
+			};
+
+			card._activeLyric = index;
+		};
+
+		if (card._lyricsMode) {
+			card.centerLyric();
+		};
+	};
+
+	card.setLyricsMode = function (enabled) {
+		const next = Boolean(enabled);
+
+		if (next === card._lyricsMode) return;
+
+		card._lyricsMode = next;
+		card.content.visible = !next;
+		card.lyricsView.visible = next;
+
+		if (next) {
+			card.lyricsView.queue_relayout();
+			card._centerPending = true;
+			card.centerLyric();
+		};
 	};
 
 	card.update = function ({
@@ -431,6 +696,15 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 		card.btnPlay.button.opacity = control && (playing ? canPause : canPlay) ? 255 : 100;
 		card.btnNext.button.reactive = control && (!!canNext || forceNext);
 		card.btnNext.button.opacity = control && (canNext || forceNext) ? 255 : 100;
+
+		card.lyricsTitle.text = hasTrack ? title : '';
+		card.btnLyrics.button.reactive = hasTrack;
+		card.btnLyrics.button.opacity = hasTrack ? 255 : 100;
+		recolorIcon(card.btnLyrics, colors.foreground);
+
+		if (!hasTrack && card._lyricsMode) {
+			card.setLyricsMode(false);
+		};
 
 		const seekable = hasTrack && control && (length > 0 || playing) && (canSeek || canPlay || canPause);
 		card.slider.reactive = seekable;

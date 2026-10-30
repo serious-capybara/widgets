@@ -54,7 +54,7 @@ export class SystemMediaControls {
 
 	destroy() {
 		if (this._syncId) {
-			GLib.source_remove(this._syncId);
+			GLib.Source.remove(this._syncId);
 		};
 		this._syncId = 0;
 		for (const object of this._emitters) {

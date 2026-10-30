@@ -2,12 +2,12 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {warn} from '../../logger.js';
-import {PLAYER_IFACE, PLAYER_PATH, DBUS_IFACE, isBrowserName, variantValue, parseMetadata, boundedPosition, validPlayerPosition, settingBoolean} from './helpers.js';
+import {PLAYER_IFACE, PLAYER_PATH, DBUS_IFACE, isBrowserName, variantValue, parseMetadata, boundedPosition, validPlayerPosition} from './helpers.js';
 import {MprisTransport} from './transport.js';
+import {LyricsProvider, lyricIndexAt, lyricsKey} from './lyricsProvider.js';
 
 const TICK_MS = 500;
 const LOOP_CYCLE = ['None', 'Track', 'Playlist'];
-
 export class Controller {
 	constructor(card, bus, settings, editMode = false) {
 		this._card = card;
@@ -52,15 +52,19 @@ export class Controller {
 		this._acceptUntil = 0;
 		this._loopSupport = null;
 		this._controlEmitters = new Set();
+		this._lyrics = null;
+		this._lyricsKey = null;
+		this._lyricsToken = 0;
+		this._lyricsProvider = new LyricsProvider();
 		this._bindControls();
 		this._bindBackgroundSetting();
 	};
 
 	_bindBackgroundSetting() {
-		this._card.setBlurredBackground(settingBoolean(this._settings, 'music-blurred-background', true));
+		this._card.setBlurredBackground(this._settings.get_boolean('music-blurred-background'));
 
-		this._settings?.connectObject('changed::music-blurred-background', () => {
-			this._card.setBlurredBackground(settingBoolean(this._settings, 'music-blurred-background', true));
+		this._settings.connectObject('changed::music-blurred-background', () => {
+			this._card.setBlurredBackground(this._settings.get_boolean('music-blurred-background'));
 		}, this);
 	};
 
@@ -95,7 +99,7 @@ export class Controller {
 
 
 	_pickActive() {
-		return this._transport.pickActive(settingBoolean(this._settings, 'music-ignore-browsers'), this._lastPlayingAt);
+		return this._transport.pickActive(this._settings.get_boolean('music-ignore-browsers'), this._lastPlayingAt);
 	};
 
 	_wire(name) {
@@ -104,7 +108,7 @@ export class Controller {
 		this._generation++;
 
 		for (const id of this._subIds) {
-			this._bus?.signal_unsubscribe(id);
+			this._bus.signal_unsubscribe(id);
 		};
 
 		this._subIds = [];
@@ -119,11 +123,11 @@ export class Controller {
 			(_connection, _sender, _objectPath, _iface, _signal, parameters) => {
 				if (this._cancellable.is_cancelled() || !this._card || name !== this._name) return;
 
-				const [changedInterface, changed, _invalidated] = parameters?.deep_unpack() ?? [];
+				const [changedInterface, changed, _invalidated] = parameters.deep_unpack();
 
 				if (changedInterface !== PLAYER_IFACE) return;
 
-				const statusChanged = changed?.PlaybackStatus !== undefined;
+				const statusChanged = changed.PlaybackStatus !== undefined;
 
 				if (statusChanged) {
 					this._applyStatus(variantValue(changed.PlaybackStatus));
@@ -133,7 +137,7 @@ export class Controller {
 					};
 				};
 
-				if (changed?.Position !== undefined) {
+				if (changed.Position !== undefined) {
 					const value = Number(variantValue(changed.Position));
 					if (validPlayerPosition(value, this._position, this._length, this._status)) {
 						this._positionRequestId++;
@@ -143,31 +147,31 @@ export class Controller {
 					};
 				};
 
-				if (changed?.CanControl !== undefined) {
+				if (changed.CanControl !== undefined) {
 					this._canControl = Boolean(variantValue(changed.CanControl));
 				};
 
-				if (changed?.CanGoPrevious !== undefined) {
+				if (changed.CanGoPrevious !== undefined) {
 					this._canPrev = Boolean(variantValue(changed.CanGoPrevious));
 				};
 
-				if (changed?.CanGoNext !== undefined) {
+				if (changed.CanGoNext !== undefined) {
 					this._canNext = Boolean(variantValue(changed.CanGoNext));
 				};
 
-				if (changed?.CanPlay !== undefined) {
+				if (changed.CanPlay !== undefined) {
 					this._canPlay = Boolean(variantValue(changed.CanPlay));
 				};
 
-				if (changed?.CanPause !== undefined) {
+				if (changed.CanPause !== undefined) {
 					this._canPause = Boolean(variantValue(changed.CanPause));
 				};
 
-				if (changed?.CanSeek !== undefined) {
+				if (changed.CanSeek !== undefined) {
 					this._canSeek = Boolean(variantValue(changed.CanSeek));
 				};
 
-				if (changed?.LoopStatus !== undefined) {
+				if (changed.LoopStatus !== undefined) {
 					this._loop = variantValue(changed.LoopStatus);
 
 					if (this._loopSupport === false) {
@@ -175,11 +179,11 @@ export class Controller {
 					};
 				};
 
-				if (changed?.Rate !== undefined) {
+				if (changed.Rate !== undefined) {
 					this._rate = Number(variantValue(changed.Rate)) || 1;
 				};
 
-				if (changed?.Metadata !== undefined) {
+				if (changed.Metadata !== undefined) {
 					this._handleMetaChange(parseMetadata(changed.Metadata));
 				};
 
@@ -191,7 +195,7 @@ export class Controller {
 			(_connection, _sender, _objectPath, _iface, _signal, parameters) => {
 				if (this._cancellable.is_cancelled() || !this._card || name !== this._name) return;
 
-				const [position] = parameters?.deep_unpack() ?? [];
+				const [position] = parameters.deep_unpack();
 
 				if (typeof position === 'number' && position >= 0) {
 					this._positionRequestId++;
@@ -284,7 +288,7 @@ export class Controller {
 		if (this._cancellable.is_cancelled() || !this._card || !reply || player !== this._name ||
 			generation !== this._generation || requestId !== this._positionRequestId) return;
 
-		this._handleMetaChange(parseMetadata(reply.deep_unpack()?.[0]));
+		this._handleMetaChange(parseMetadata(reply.deep_unpack()[0]));
 		this._render();
 	};
 
@@ -480,6 +484,74 @@ export class Controller {
 			forcePrev: this._browser && this._playing,
 			forceNext: this._browser && this._playing,
 		});
+
+		this._syncLyrics(position);
+	};
+
+	_syncLyrics(position) {
+		if (!this._card) return;
+
+		const title = this._meta.title;
+		const key = title ? lyricsKey(this._meta.artist, title) : null;
+
+		if (key !== this._lyricsKey) {
+			this._loadLyrics(key, title, this._meta.artist);
+		};
+
+		if (!this._lyrics?.synced) return;
+
+		this._card.setActiveLyric(lyricIndexAt(this._lyrics.lines, position / 1000));
+	};
+
+	_loadLyrics(key, title, artist) {
+		this._lyricsKey = key;
+		this._lyrics = null;
+		this._lyricsProvider.cancel();
+
+		if (!key) {
+			this._card.setLyricsMessage('none');
+			return;
+		};
+
+		const cached = this._lyricsProvider.cached(artist, title);
+
+		if (cached) {
+			this._applyLyrics(cached);
+			return;
+		};
+
+		const token = ++this._lyricsToken;
+
+		this._card.setLyricsMessage('loading');
+		this._lyricsProvider.fetch(artist, title, Math.round(this._length / 1000000)).then(entry => {
+			if (entry && token === this._lyricsToken) {
+				this._applyLyrics(entry);
+			};
+		});
+	};
+
+	_applyLyrics(entry) {
+		if (!this._card) return;
+
+		this._lyrics = entry;
+
+		if (entry.lines.length === 0) {
+			this._card.setLyricsMessage('none');
+			return;
+		};
+
+		this._card.setLyrics(entry.lines.map(line => line.text), entry.synced);
+
+		if (this._playing || this._position > 0) {
+			const now = Date.now();
+			let position = this._position;
+
+			if (this._playing) {
+				position = this._position + (Math.max(0, this._rate) || 1) * (now - this._posAt) * 1000;
+			};
+
+			this._syncLyrics(position);
+		};
 	};
 
 	_bindControls() {
@@ -490,12 +562,28 @@ export class Controller {
 			this._controlEmitters.add(target);
 		};
 
+		c._onLyricClicked = index => this._onLyricClicked(index);
+
 		connect(c.btnLoop.button, 'clicked', () => this._cycleLoop());
 		connect(c.btnPrev.button, 'clicked', callMethod('Previous'));
 		connect(c.btnPlay.button, 'clicked', callMethod('PlayPause'));
 		connect(c.btnNext.button, 'clicked', callMethod('Next'));
+		connect(c.btnLyrics.button, 'clicked', () => this._card.setLyricsMode(true));
+		connect(c.btnBack.button, 'clicked', () => this._card.setLyricsMode(false));
 		connect(c.slider, 'button-press-event', (_source, event) => this._onSliderPress(event));
 		connect(c.slider, 'touch-event', (_source, event) => this._onSliderTouch(event));
+	};
+
+	_onLyricClicked(index) {
+		if (!this._lyrics || !this._lyrics.synced) return;
+
+		const line = this._lyrics.lines[index];
+
+		if (!line || typeof line.timeMs !== 'number') return;
+
+		const targetUs = line.timeMs * 1000;
+
+		this._seekToPosition(targetUs);
 	};
 
 	_onSliderTouch(event) {
@@ -509,7 +597,7 @@ export class Controller {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
-		if (!this._card?.slider?.reactive || !this._name) {
+		if (!this._card || !this._card.slider.reactive || !this._name) {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
@@ -537,7 +625,7 @@ export class Controller {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
-		if (!this._card?.slider?.reactive || !this._name) {
+		if (!this._card || !this._card.slider.reactive || !this._name) {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
@@ -569,7 +657,10 @@ export class Controller {
 
 	_endSeek(event) {
 		this._seekActive = false;
-		this._card.slider?.remove_style_pseudo_class('active');
+
+		if (!this._card) return;
+
+		this._card.slider.remove_style_pseudo_class('active');
 
 		const fraction = this._seekFrac !== null ? this._seekFrac : this._card.fractionForEvent(event);
 
@@ -587,30 +678,39 @@ export class Controller {
 
 		const reply = await this._transport.call(player, PLAYER_PATH, DBUS_IFACE, 'Get',
 			GLib.Variant.new('(ss)', [PLAYER_IFACE, 'Metadata']), null);
-		const meta = parseMetadata(reply?.deep_unpack()?.[0]);
+		const meta = parseMetadata(reply ? reply.deep_unpack()[0] : null);
 
 		return meta.trackId || null;
 	};
 
-	async _commitSeek(fraction) {
+	_commitSeek(fraction) {
+		if (!this._length) return;
+
+		const target = Math.max(0, Math.min(this._length, Math.floor(this._length * fraction)));
+
+		this._seekToPosition(target);
+	};
+
+	async _seekToPosition(targetUs) {
 		if (!this._name || !this._length || this._cancellable.is_cancelled()) return;
 
 		const player = this._name;
 		const generation = this._generation;
 		const previousTrack = this._trackId;
 
-		const target = Math.max(0, Math.min(this._length, Math.floor(this._length * fraction)));
-		const trackId = (await this._readTrackId(player)) || previousTrack || '/org/mpris/MediaPlayer2/TrackList/NoTrack';
+		const target = Math.max(0, Math.min(this._length, Math.floor(targetUs)));
 
-		if (this._cancellable.is_cancelled() || !this._card || player !== this._name ||
-			generation !== this._generation || previousTrack !== this._trackId) return;
-
+		this._positionBeforeSeek = this._position;
 		this._position = target;
 		this._positionRequestId++;
 		this._posAt = Date.now();
 		this._lastPosSync = Date.now();
 		this._seekLockUntil = Date.now() + 2000;
 		this._render();
+
+		const trackId = (await this._readTrackId(player)) || previousTrack || '/org/mpris/MediaPlayer2/TrackList/NoTrack';
+
+		if (this._cancellable.is_cancelled() || !this._card || player !== this._name || generation !== this._generation) return;
 
 		const reply = await this._transport.call(player, PLAYER_PATH, PLAYER_IFACE, 'SetPosition',
 			GLib.Variant.new('(ox)', [trackId, target]), null, true);
@@ -679,7 +779,7 @@ export class Controller {
 		if (this._cancellable.is_cancelled() || !this._card || !reply || player !== this._name ||
 			generation !== this._generation || trackId !== this._trackId || requestId !== this._positionRequestId) return;
 
-		const value = Number(variantValue(reply.deep_unpack()?.[0]));
+		const value = Number(variantValue(reply.deep_unpack()[0]));
 		if (!validPlayerPosition(value, this._position, this._length, this._status)) return;
 
 		this._position = boundedPosition(value, this._length);
@@ -760,42 +860,44 @@ export class Controller {
 		this._generation++;
 
 		if (this._timerId) {
-			GLib.source_remove(this._timerId);
+			GLib.Source.remove(this._timerId);
 			this._timerId = 0;
 		};
 
 		if (this._retryTimer) {
-			GLib.source_remove(this._retryTimer);
+			GLib.Source.remove(this._retryTimer);
 			this._retryTimer = 0;
 		};
 
 		this._detachSeekCapture();
 
 		for (const id of this._subIds) {
-			this._bus?.signal_unsubscribe(id);
+			this._bus.signal_unsubscribe(id);
 		};
 
 		this._subIds = [];
 
 		if (this._watchId) {
-			this._bus?.unwatch_name(this._watchId);
+			this._bus.unwatch_name(this._watchId);
 			this._watchId = 0;
 		};
 
 
-		this._settings?.disconnectObject(this);
+		this._settings.disconnectObject(this);
 
 		for (const target of this._controlEmitters) {
 			target.disconnectObject(this);
 		};
 
 		this._controlEmitters.clear();
+		this._lyricsToken++;
+		this._lyricsProvider.destroy();
+		this._lyrics = null;
 		this._transport.destroy();
 		this._seekActive = false;
 		this._name = null;
 
 		this._card = null;
 		this._bus = null;
-		this._settings = null;
 	};
 };

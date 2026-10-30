@@ -1,3 +1,5 @@
+import GLib from 'gi://GLib';
+
 export const PLAYER_IFACE = 'org.mpris.MediaPlayer2.Player';
 export const PLAYER_PATH = '/org/mpris/MediaPlayer2';
 export const DBUS_IFACE = 'org.freedesktop.DBus.Properties';
@@ -10,7 +12,7 @@ export function isBrowserName(name) {
 };
 
 export function variantValue(value) {
-	return value && typeof value.deep_unpack === 'function' ? value.deep_unpack() : value;
+	return value instanceof GLib.Variant ? value.deep_unpack() : value;
 };
 
 export function parseMetadata(metadata) {
@@ -51,8 +53,4 @@ export function validPlayerPosition(value, current, length, status) {
 	return Number.isFinite(value) && value >= 0 &&
 		!(value < 500000 && current > 2000000 && status !== 'Stopped' &&
 			(!length || current < length - 2000000));
-};
-
-export function settingBoolean(settings, key, fallback = false) {
-	return settings?.get_boolean(key) ?? fallback;
 };
