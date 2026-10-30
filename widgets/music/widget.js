@@ -1,7 +1,6 @@
 import {watchSettings} from '../../utils/widget.js';
 import {createCard} from './card.js';
 import {Controller} from './controller.js';
-import {settingBoolean} from './helpers.js';
 import {sessionBus, resetSessionBus} from './transport.js';
 import {SystemMediaControls} from './systemMediaControls.js';
 
@@ -31,7 +30,7 @@ export function render({body, createLabel, theme, sizeForWidget, widget, setting
 	watchSettings(body, settings, ['music-ignore-browsers'], refresh);
 	const [widgetWidth, widgetHeight] = sizeForWidget ? sizeForWidget(widget) : [394, 190];
 	const card = createCard(theme, createLabel, widgetWidth, widgetHeight,
-		settingBoolean(settings, 'music-blurred-background', true));
+		settings.get_boolean('music-blurred-background'));
 	const controller = new Controller(card, sessionBus(), settings, editMode);
 
 	body.add_child(card.container);

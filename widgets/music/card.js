@@ -28,7 +28,7 @@ function safeArtworkUri(value) {
 
 	try {
 		const uri = GLib.Uri.parse(value, GLib.UriFlags.NONE);
-		const scheme = uri.get_scheme()?.toLowerCase();
+		const scheme = uri.get_scheme().toLowerCase();
 
 		return ['file', 'http', 'https'].includes(scheme) ? uri.to_string() : null;
 	} catch {
@@ -136,7 +136,7 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 	const playSize = compact ? 34 : roomy ? 44 : 38;
 	const showTimeline = !compact && contentHeight >= 100 && contentWidth >= 150;
 	const card = {};
-	const radius = theme?.radius ?? 26;
+	const radius = theme.radius ?? 26;
 	const backdropInset = 48;
 
 	card.container = new St.Widget({
@@ -222,7 +222,9 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 		const backdropActor = uri && card._backgroundEnabled
 			? artworkActor(uri, width + backdropInset * 2, height + backdropInset * 2, 'widget-music-backdrop-art')
 			: null;
-		backdropActor?.set_position(-backdropInset, -backdropInset);
+		if (backdropActor) {
+			backdropActor.set_position(-backdropInset, -backdropInset);
+		};
 
 		card.coverArt = replaceActor(card.coverBox, card.coverArt, coverActor);
 		card.backdropArt = replaceActor(card.backdrop, card.backdropArt, backdropActor);

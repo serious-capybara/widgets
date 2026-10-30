@@ -3,8 +3,9 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
 import {warn} from '../../logger.js';
-import {PLAYER_IFACE, PLAYER_PATH, DBUS_IFACE, isBrowserName, variantValue, parseMetadata, boundedPosition, validPlayerPosition, settingBoolean} from './helpers.js';
+import {PLAYER_IFACE, PLAYER_PATH, DBUS_IFACE, isBrowserName, variantValue, parseMetadata, boundedPosition, validPlayerPosition} from './helpers.js';
 import {MprisTransport} from './transport.js';
+import {LyricsProvider, lyricIndexAt, lyricsKey} from './lyricsProvider.js';
 
 const TICK_MS = 500;
 const LOOP_CYCLE = ['None', 'Track', 'Playlist'];
@@ -203,10 +204,10 @@ export class Controller {
 	};
 
 	_bindBackgroundSetting() {
-		this._card.setBlurredBackground(settingBoolean(this._settings, 'music-blurred-background', true));
+		this._card.setBlurredBackground(this._settings.get_boolean('music-blurred-background'));
 
-		this._settings?.connectObject('changed::music-blurred-background', () => {
-			this._card.setBlurredBackground(settingBoolean(this._settings, 'music-blurred-background', true));
+		this._settings.connectObject('changed::music-blurred-background', () => {
+			this._card.setBlurredBackground(this._settings.get_boolean('music-blurred-background'));
 		}, this);
 	};
 
@@ -241,7 +242,7 @@ export class Controller {
 
 
 	_pickActive() {
-		return this._transport.pickActive(settingBoolean(this._settings, 'music-ignore-browsers'), this._lastPlayingAt);
+		return this._transport.pickActive(this._settings.get_boolean('music-ignore-browsers'), this._lastPlayingAt);
 	};
 
 	_wire(name) {
@@ -250,7 +251,7 @@ export class Controller {
 		this._generation++;
 
 		for (const id of this._subIds) {
-			this._bus?.signal_unsubscribe(id);
+			this._bus.signal_unsubscribe(id);
 		};
 
 		this._subIds = [];
@@ -265,11 +266,11 @@ export class Controller {
 			(_connection, _sender, _objectPath, _iface, _signal, parameters) => {
 				if (this._cancellable.is_cancelled() || !this._card || name !== this._name) return;
 
-				const [changedInterface, changed, _invalidated] = parameters?.deep_unpack() ?? [];
+				const [changedInterface, changed, _invalidated] = parameters.deep_unpack();
 
 				if (changedInterface !== PLAYER_IFACE) return;
 
-				const statusChanged = changed?.PlaybackStatus !== undefined;
+				const statusChanged = changed.PlaybackStatus !== undefined;
 
 				if (statusChanged) {
 					this._applyStatus(variantValue(changed.PlaybackStatus));
@@ -279,7 +280,7 @@ export class Controller {
 					};
 				};
 
-				if (changed?.Position !== undefined) {
+				if (changed.Position !== undefined) {
 					const value = Number(variantValue(changed.Position));
 					if (validPlayerPosition(value, this._position, this._length, this._status)) {
 						this._positionRequestId++;
@@ -289,31 +290,31 @@ export class Controller {
 					};
 				};
 
-				if (changed?.CanControl !== undefined) {
+				if (changed.CanControl !== undefined) {
 					this._canControl = Boolean(variantValue(changed.CanControl));
 				};
 
-				if (changed?.CanGoPrevious !== undefined) {
+				if (changed.CanGoPrevious !== undefined) {
 					this._canPrev = Boolean(variantValue(changed.CanGoPrevious));
 				};
 
-				if (changed?.CanGoNext !== undefined) {
+				if (changed.CanGoNext !== undefined) {
 					this._canNext = Boolean(variantValue(changed.CanGoNext));
 				};
 
-				if (changed?.CanPlay !== undefined) {
+				if (changed.CanPlay !== undefined) {
 					this._canPlay = Boolean(variantValue(changed.CanPlay));
 				};
 
-				if (changed?.CanPause !== undefined) {
+				if (changed.CanPause !== undefined) {
 					this._canPause = Boolean(variantValue(changed.CanPause));
 				};
 
-				if (changed?.CanSeek !== undefined) {
+				if (changed.CanSeek !== undefined) {
 					this._canSeek = Boolean(variantValue(changed.CanSeek));
 				};
 
-				if (changed?.LoopStatus !== undefined) {
+				if (changed.LoopStatus !== undefined) {
 					this._loop = variantValue(changed.LoopStatus);
 
 					if (this._loopSupport === false) {
@@ -321,11 +322,11 @@ export class Controller {
 					};
 				};
 
-				if (changed?.Rate !== undefined) {
+				if (changed.Rate !== undefined) {
 					this._rate = Number(variantValue(changed.Rate)) || 1;
 				};
 
-				if (changed?.Metadata !== undefined) {
+				if (changed.Metadata !== undefined) {
 					this._handleMetaChange(parseMetadata(changed.Metadata));
 				};
 
@@ -337,7 +338,7 @@ export class Controller {
 			(_connection, _sender, _objectPath, _iface, _signal, parameters) => {
 				if (this._cancellable.is_cancelled() || !this._card || name !== this._name) return;
 
-				const [position] = parameters?.deep_unpack() ?? [];
+				const [position] = parameters.deep_unpack();
 
 				if (typeof position === 'number' && position >= 0) {
 					this._positionRequestId++;
@@ -430,7 +431,7 @@ export class Controller {
 		if (this._cancellable.is_cancelled() || !this._card || !reply || player !== this._name ||
 			generation !== this._generation || requestId !== this._positionRequestId) return;
 
-		this._handleMetaChange(parseMetadata(reply.deep_unpack()?.[0]));
+		this._handleMetaChange(parseMetadata(reply.deep_unpack()[0]));
 		this._render();
 	};
 
@@ -860,7 +861,7 @@ export class Controller {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
-		if (!this._card?.slider?.reactive || !this._name) {
+		if (!this._card || !this._card.slider.reactive || !this._name) {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
@@ -888,7 +889,7 @@ export class Controller {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
-		if (!this._card?.slider?.reactive || !this._name) {
+		if (!this._card || !this._card.slider.reactive || !this._name) {
 			return Clutter.EVENT_PROPAGATE;
 		};
 
@@ -920,7 +921,10 @@ export class Controller {
 
 	_endSeek(event) {
 		this._seekActive = false;
-		this._card.slider?.remove_style_pseudo_class('active');
+
+		if (!this._card) return;
+
+		this._card.slider.remove_style_pseudo_class('active');
 
 		const fraction = this._seekFrac !== null ? this._seekFrac : this._card.fractionForEvent(event);
 
@@ -938,7 +942,7 @@ export class Controller {
 
 		const reply = await this._transport.call(player, PLAYER_PATH, DBUS_IFACE, 'Get',
 			GLib.Variant.new('(ss)', [PLAYER_IFACE, 'Metadata']), null);
-		const meta = parseMetadata(reply?.deep_unpack()?.[0]);
+		const meta = parseMetadata(reply ? reply.deep_unpack()[0] : null);
 
 		return meta.trackId || null;
 	};
@@ -1039,7 +1043,7 @@ export class Controller {
 		if (this._cancellable.is_cancelled() || !this._card || !reply || player !== this._name ||
 			generation !== this._generation || trackId !== this._trackId || requestId !== this._positionRequestId) return;
 
-		const value = Number(variantValue(reply.deep_unpack()?.[0]));
+		const value = Number(variantValue(reply.deep_unpack()[0]));
 		if (!validPlayerPosition(value, this._position, this._length, this._status)) return;
 
 		this._position = boundedPosition(value, this._length);
@@ -1120,30 +1124,30 @@ export class Controller {
 		this._generation++;
 
 		if (this._timerId) {
-			GLib.source_remove(this._timerId);
+			GLib.Source.remove(this._timerId);
 			this._timerId = 0;
 		};
 
 		if (this._retryTimer) {
-			GLib.source_remove(this._retryTimer);
+			GLib.Source.remove(this._retryTimer);
 			this._retryTimer = 0;
 		};
 
 		this._detachSeekCapture();
 
 		for (const id of this._subIds) {
-			this._bus?.signal_unsubscribe(id);
+			this._bus.signal_unsubscribe(id);
 		};
 
 		this._subIds = [];
 
 		if (this._watchId) {
-			this._bus?.unwatch_name(this._watchId);
+			this._bus.unwatch_name(this._watchId);
 			this._watchId = 0;
 		};
 
 
-		this._settings?.disconnectObject(this);
+		this._settings.disconnectObject(this);
 
 		for (const target of this._controlEmitters) {
 			target.disconnectObject(this);
@@ -1162,6 +1166,5 @@ export class Controller {
 
 		this._card = null;
 		this._bus = null;
-		this._settings = null;
 	};
 };

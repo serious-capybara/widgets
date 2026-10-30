@@ -68,7 +68,7 @@ export class MprisTransport {
 	async listCandidates() {
 		const result = await this.call('org.freedesktop.DBus', '/org/freedesktop/DBus',
 			'org.freedesktop.DBus', 'ListNames', null, GLib.VariantType.new('(as)'));
-		const names = result?.deep_unpack()?.[0] ?? [];
+		const names = result ? result.deep_unpack()[0] : [];
 
 		return names.filter(name => name.startsWith('org.mpris.MediaPlayer2.'));
 	};
@@ -148,7 +148,7 @@ export class MprisTransport {
 	async _readProps(name) {
 		const result = await this.call(name, PLAYER_PATH, DBUS_IFACE, 'GetAll',
 			GLib.Variant.new('(s)', [PLAYER_IFACE]), GLib.VariantType.new('(a{sv})'));
-		const props = result?.deep_unpack()?.[0] ?? null;
+		const props = result ? result.deep_unpack()[0] : null;
 
 		return props && typeof props === 'object' ? props : null;
 	};
