@@ -502,19 +502,19 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 		button.set_child(label);
 
 		const triggerClick = () => {
-			card._onLyricClicked(index);
+			if (typeof card._onLyricClicked === 'function') {
+				card._onLyricClicked(index);
+			};
 		};
 
-		button.connectObject(
-			'clicked', triggerClick,
-			'button-release-event', (_source, event) => {
-				if (event.get_button() === 1) {
-					triggerClick();
-					return Clutter.EVENT_STOP;
-				};
-				return Clutter.EVENT_PROPAGATE;
-			},
-			button);
+		button.connect('clicked', triggerClick);
+		button.connect('button-release-event', (_source, event) => {
+			if (event.get_button() === 1) {
+				triggerClick();
+				return Clutter.EVENT_STOP;
+			};
+			return Clutter.EVENT_PROPAGATE;
+		});
 
 		styleLyric(button, label, false);
 
@@ -592,7 +592,7 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 
 		card._centerPending = false;
 
-		if (snap) {
+		if (snap || typeof adjustment.ease !== 'function') {
 			adjustment.value = target;
 		} else {
 			adjustment.ease(target, {duration: 300, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
@@ -609,12 +609,12 @@ export function createCard(theme, createLabel, widgetWidth, widgetHeight, blurre
 			const next = card.lyricsLines[index];
 
 			if (previous) {
-				const prevLabel = previous.get_child();
+				const prevLabel = previous.get_child?.() ?? previous;
 				styleLyric(previous, prevLabel, false);
 			};
 
 			if (next) {
-				const nextLabel = next.get_child();
+				const nextLabel = next.get_child?.() ?? next;
 				styleLyric(next, nextLabel, true);
 			};
 

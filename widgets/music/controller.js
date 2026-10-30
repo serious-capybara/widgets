@@ -1,6 +1,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Soup from 'gi://Soup?version=3.0';
 import {warn} from '../../logger.js';
 import {PLAYER_IFACE, PLAYER_PATH, DBUS_IFACE, isBrowserName, variantValue, parseMetadata, boundedPosition, validPlayerPosition} from './helpers.js';
 import {MprisTransport} from './transport.js';
@@ -8,6 +9,147 @@ import {LyricsProvider, lyricIndexAt, lyricsKey} from './lyricsProvider.js';
 
 const TICK_MS = 500;
 const LOOP_CYCLE = ['None', 'Track', 'Playlist'];
+const LRCLIB_URL = 'https://lrclib.net/api/get';
+const LRCLIB_SEARCH_URL = 'https://lrclib.net/api/search';
+const USER_AGENT = 'Widgets-GNOME-Extension/1.0 (https://github.com/TheRealSourcer/widgets)';
+const LYRICS_CACHE_LIMIT = 64;
+const LYRICS_CACHE = new Map();
+const LEADING_STAMPS = /^(?:\s*\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\])+/;
+const STAMP = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
+
+function lyricsKey(artist, title) {
+	return `${String(artist ?? '').toLowerCase()}\n${String(title ?? '').toLowerCase()}`;
+};
+
+function storeLyrics(key, entry) {
+	if (LYRICS_CACHE.size >= LYRICS_CACHE_LIMIT && !LYRICS_CACHE.has(key)) {
+		LYRICS_CACHE.delete(LYRICS_CACHE.keys().next().value);
+	};
+
+	LYRICS_CACHE.set(key, entry);
+};
+
+const OFFSET_TAG = /^\s*\[offset:\s*([+-]?\d+)\s*\]\s*$/i;
+const WORD_STAMP = /<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>/g;
+
+function parseSyncedLyrics(source) {
+	const lines = [];
+	let offset = 0;
+
+	for (const raw of source.replace(/^\uFEFF/, '').split(/\r?\n/)) {
+		const tag = raw.match(OFFSET_TAG);
+
+		if (tag) {
+			offset = Number(tag[1]);
+			continue;
+		};
+
+		const lead = raw.match(LEADING_STAMPS);
+
+		if (!lead) continue;
+
+		const text = raw.slice(lead[0].length).replace(WORD_STAMP, '').replace(/\s+/g, ' ').trim();
+
+		for (const stamp of lead[0].matchAll(STAMP)) {
+			const fraction = stamp[3] ? Number(stamp[3].padEnd(3, '0').slice(0, 3)) : 0;
+			const timeMs = (Number(stamp[1]) * 60 + Number(stamp[2])) * 1000 + fraction;
+
+			lines.push({timeMs: Math.max(0, timeMs - offset), text: text || '\u266a'});
+		};
+	};
+
+	lines.sort((a, b) => a.timeMs - b.timeMs);
+
+	return lines;
+};
+
+function parsePlainLyrics(source) {
+	const lines = [];
+
+	for (const raw of source.trim().split(/\r?\n/)) {
+		const text = raw.trim();
+
+		if (text === '' && (lines.length === 0 || lines[lines.length - 1].text === '')) continue;
+
+		lines.push({timeMs: null, text});
+	};
+
+	return lines;
+};
+
+function lyricsFromPayload(payload) {
+	const synced = typeof payload?.syncedLyrics === 'string' ? parseSyncedLyrics(payload.syncedLyrics) : [];
+
+	if (synced.length > 0) {
+		return {synced: true, lines: synced};
+	};
+
+	const plain = typeof payload?.plainLyrics === 'string' ? parsePlainLyrics(payload.plainLyrics) : [];
+
+	return {synced: false, lines: plain};
+};
+
+function lyricsDebug(message) {
+	console.log(`[widgets:music-lyrics] ${message}`);
+};
+
+function parseLyricsText(text) {
+	try {
+		return lyricsFromPayload(JSON.parse(text));
+	} catch (error) {
+		lyricsDebug(`parse failed: ${error.message}`);
+		warn('music-lyrics-parse', `Could not parse lyrics: ${error.message}`);
+		return {synced: false, lines: []};
+	};
+};
+
+function pickLyricsPayload(text, seconds) {
+	let list = null;
+
+	try {
+		list = JSON.parse(text);
+	} catch (error) {
+		lyricsDebug(`search parse failed: ${error.message}`);
+		return {synced: false, lines: []};
+	};
+
+	if (!Array.isArray(list)) return {synced: false, lines: []};
+
+	const usable = list.filter(item => (typeof item?.syncedLyrics === 'string' && item.syncedLyrics.trim() !== '')
+		|| (typeof item?.plainLyrics === 'string' && item.plainLyrics.trim() !== ''));
+	const distance = item => (seconds > 0 && Number.isFinite(item?.duration) ? Math.abs(item.duration - seconds) : 0);
+
+	usable.sort((a, b) => {
+		const syncedA = typeof a.syncedLyrics === 'string' && a.syncedLyrics.trim() !== '' ? 0 : 1;
+		const syncedB = typeof b.syncedLyrics === 'string' && b.syncedLyrics.trim() !== '' ? 0 : 1;
+
+		return syncedA - syncedB || distance(a) - distance(b);
+	});
+
+	lyricsDebug(`search results=${list.length} usable=${usable.length}`);
+
+	return usable.length > 0 ? lyricsFromPayload(usable[0]) : {synced: false, lines: []};
+};
+
+function lyricIndexAt(lines, ms) {
+	let low = 0;
+	let high = lines.length - 1;
+	let found = -1;
+
+	while (low <= high) {
+		const mid = (low + high) >> 1;
+
+		if (lines[mid].timeMs <= ms) {
+			found = mid;
+			low = mid + 1;
+		} else {
+			high = mid - 1;
+		};
+	};
+
+	return found;
+};
+
 export class Controller {
 	constructor(card, bus, settings, editMode = false) {
 		this._card = card;
@@ -52,10 +194,11 @@ export class Controller {
 		this._acceptUntil = 0;
 		this._loopSupport = null;
 		this._controlEmitters = new Set();
+		this._session = null;
 		this._lyrics = null;
 		this._lyricsKey = null;
 		this._lyricsToken = 0;
-		this._lyricsProvider = new LyricsProvider();
+		this._lyricsCancellable = null;
 		this._bindControls();
 		this._bindBackgroundSetting();
 	};
@@ -495,6 +638,7 @@ export class Controller {
 		const key = title ? lyricsKey(this._meta.artist, title) : null;
 
 		if (key !== this._lyricsKey) {
+			lyricsDebug(`track changed key=${key} title=${title} artist=${this._meta.artist} length=${this._length}`);
 			this._loadLyrics(key, title, this._meta.artist);
 		};
 
@@ -506,27 +650,28 @@ export class Controller {
 	_loadLyrics(key, title, artist) {
 		this._lyricsKey = key;
 		this._lyrics = null;
-		this._lyricsProvider.cancel();
+		this._lyricsToken++;
+		this._lyricsCancellable?.cancel();
+		this._lyricsCancellable = null;
 
 		if (!key) {
+			lyricsDebug('no key, showing empty message');
 			this._card.setLyricsMessage('none');
 			return;
 		};
 
-		const cached = this._lyricsProvider.cached(artist, title);
+		const cached = LYRICS_CACHE.get(key);
 
 		if (cached) {
+			lyricsDebug(`cache hit key=${key} lines=${cached.lines.length}`);
 			this._applyLyrics(cached);
 			return;
 		};
 
-		const token = ++this._lyricsToken;
-
+		lyricsDebug(`cache miss key=${key}, fetching`);
 		this._card.setLyricsMessage('loading');
-		this._lyricsProvider.fetch(artist, title, Math.round(this._length / 1000000)).then(entry => {
-			if (entry && token === this._lyricsToken) {
-				this._applyLyrics(entry);
-			};
+		this._fetchLyrics(key, title, artist, this._lyricsToken).catch(error => {
+			lyricsDebug(`fetch crashed: ${error.message}`);
 		});
 	};
 
@@ -536,10 +681,12 @@ export class Controller {
 		this._lyrics = entry;
 
 		if (entry.lines.length === 0) {
+			lyricsDebug('apply: no lines, showing none message');
 			this._card.setLyricsMessage('none');
 			return;
 		};
 
+		lyricsDebug(`apply: setLyrics lines=${entry.lines.length} synced=${entry.synced} first=${JSON.stringify(entry.lines[0].text)}`);
 		this._card.setLyrics(entry.lines.map(line => line.text), entry.synced);
 
 		if (this._playing || this._position > 0) {
@@ -552,6 +699,103 @@ export class Controller {
 
 			this._syncLyrics(position);
 		};
+	};
+
+	_requestLyrics(url, cancellable) {
+		return new Promise(resolve => {
+			if (!this._card) {
+				resolve(null);
+				return;
+			};
+
+			this._session ??= new Soup.Session({user_agent: USER_AGENT, timeout: 15, idle_timeout: 15});
+
+			let message = null;
+
+			try {
+				message = Soup.Message.new('GET', url);
+			} catch (error) {
+				lyricsDebug(`message build failed: ${error.message}`);
+				message = null;
+			};
+
+			if (!message) {
+				resolve(null);
+				return;
+			};
+
+			lyricsDebug(`GET ${url}`);
+
+			this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, cancellable, (session, result) => {
+				try {
+					const bytes = session.send_and_read_finish(result);
+					const text = new TextDecoder().decode(bytes.get_data() ?? new Uint8Array());
+					const status = message.get_status();
+
+					lyricsDebug(`response status=${status} bytes=${text.length} body=${text.slice(0, 400)}`);
+					resolve({status, text});
+				} catch (error) {
+					lyricsDebug(`request failed: ${error.message}`);
+					resolve(null);
+				};
+			});
+		});
+	};
+
+	async _fetchLyrics(key, title, artist, token) {
+		const cancellable = new Gio.Cancellable();
+
+		this._lyricsCancellable = cancellable;
+
+		const stale = () => cancellable.is_cancelled() || !this._card || token !== this._lyricsToken;
+		const seconds = Math.round(this._length / 1000000);
+		const query = `artist_name=${encodeURIComponent(artist ?? '')}&track_name=${encodeURIComponent(title)}`;
+		const getUrl = `${LRCLIB_URL}?${query}${seconds > 0 ? `&duration=${seconds}` : ''}`;
+		const searchUrl = `${LRCLIB_SEARCH_URL}?${query}`;
+		let entry = {synced: false, lines: []};
+		let reliable = false;
+
+		const direct = await this._requestLyrics(getUrl, cancellable);
+
+		if (stale()) {
+			lyricsDebug('direct request result discarded as stale');
+			return;
+		};
+
+		if (direct?.status === 200) {
+			entry = parseLyricsText(direct.text);
+			reliable = true;
+		} else if (direct?.status === 404) {
+			reliable = true;
+		};
+
+		lyricsDebug(`direct result lines=${entry.lines.length} synced=${entry.synced}`);
+
+		if (entry.lines.length === 0) {
+			const search = await this._requestLyrics(searchUrl, cancellable);
+
+			if (stale()) {
+				lyricsDebug('search request result discarded as stale');
+				return;
+			};
+
+			if (search?.status === 200) {
+				entry = pickLyricsPayload(search.text, seconds);
+				reliable = true;
+			} else {
+				reliable = false;
+			};
+
+			lyricsDebug(`search result lines=${entry.lines.length} synced=${entry.synced}`);
+		};
+
+		this._lyricsCancellable = null;
+
+		if (reliable) {
+			storeLyrics(key, entry);
+		};
+
+		this._applyLyrics(entry);
 	};
 
 	_bindControls() {
@@ -568,20 +812,40 @@ export class Controller {
 		connect(c.btnPrev.button, 'clicked', callMethod('Previous'));
 		connect(c.btnPlay.button, 'clicked', callMethod('PlayPause'));
 		connect(c.btnNext.button, 'clicked', callMethod('Next'));
-		connect(c.btnLyrics.button, 'clicked', () => this._card.setLyricsMode(true));
-		connect(c.btnBack.button, 'clicked', () => this._card.setLyricsMode(false));
+		connect(c.btnLyrics.button, 'clicked', () => {
+			lyricsDebug(`btnLyrics clicked key=${this._lyricsKey} lines=${this._lyrics?.lines.length ?? 'null'}`);
+			this._card?.setLyricsMode(true);
+			GLib.idle_add(GLib.PRIORITY_LOW, () => {
+				const card = this._card;
+
+				if (card?.lyricsView && card.lyricsScroll && card.lyricsList) {
+					const box = actor => {
+						const [width, height] = actor.get_size();
+
+						return `${Math.round(width)}x${Math.round(height)}`;
+					};
+
+					lyricsDebug(`layout visible=${card.lyricsView.visible} view=${box(card.lyricsView)} scroll=${box(card.lyricsScroll)} list=${box(card.lyricsList)} lines=${card.lyricsLines.length}`);
+				};
+
+				return GLib.SOURCE_REMOVE;
+			});
+		});
+		connect(c.btnBack.button, 'clicked', () => this._card?.setLyricsMode(false));
 		connect(c.slider, 'button-press-event', (_source, event) => this._onSliderPress(event));
 		connect(c.slider, 'touch-event', (_source, event) => this._onSliderTouch(event));
 	};
 
 	_onLyricClicked(index) {
-		if (!this._lyrics || !this._lyrics.synced) return;
+		if (!this._lyrics?.lines || !this._lyrics.synced) return;
 
 		const line = this._lyrics.lines[index];
 
 		if (!line || typeof line.timeMs !== 'number') return;
 
 		const targetUs = line.timeMs * 1000;
+
+		lyricsDebug(`lyric clicked index=${index} timeMs=${line.timeMs} targetUs=${targetUs}`);
 
 		this._seekToPosition(targetUs);
 	};
@@ -891,7 +1155,10 @@ export class Controller {
 
 		this._controlEmitters.clear();
 		this._lyricsToken++;
-		this._lyricsProvider.destroy();
+		this._lyricsCancellable?.cancel();
+		this._lyricsCancellable = null;
+		this._session?.abort();
+		this._session = null;
 		this._lyrics = null;
 		this._transport.destroy();
 		this._seekActive = false;
